@@ -3,13 +3,18 @@ import requests
 import json
 import pandas as pd
 import torch
-from chronos import ChronosPipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+import logging
 
-# create our Flask app
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create our Flask app
 app = Flask(__name__)
 
-# define the Hugging Face model we will use
-model_name = "amazon/chronos-t5-tiny"
+# Define the Hugging Face model we will use
+model_name = "ibm-granite/granite-timeseries-ttm-v1"
 
 def get_coingecko_url(token):
     base_url = "https://api.coingecko.com/api/v3/coins/"
@@ -28,55 +33,69 @@ def get_coingecko_url(token):
     else:
         raise ValueError("Unsupported token")
 
-# define our endpoint
 @app.route("/inference/<string:token>")
 def get_inference(token):
     """Generate inference for given token."""
     try:
-        # use a pipeline as a high-level helper
-        pipeline = ChronosPipeline.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-        )
+        # Load the model and tokenizer
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        forecasting_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
     except Exception as e:
+        logger.error(f"Pipeline initialization error: {e}")
         return Response(json.dumps({"pipeline error": str(e)}), status=500, mimetype='application/json')
 
     try:
-        # get the data from Coingecko
+        # Get the data from Coingecko
         url = get_coingecko_url(token)
     except ValueError as e:
+        logger.error(f"URL generation error: {e}")
         return Response(json.dumps({"error": str(e)}), status=400, mimetype='application/json')
 
     headers = {
         "accept": "application/json",
-        "x-cg-demo-api-key": "<Your Coingecko API key>" # replace with your API key
+        # Replace with your API key or manage securely
+        "x-cg-demo-api-key": "CG-ts4JYFHPiNtfFkn7F88EgR2s" 
     }
 
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
         data = response.json()
+    except requests.RequestException as e:
+        logger.error(f"API request error: {e}")
+        return Response(json.dumps({"Failed to retrieve data from the API": str(e)}), 
+                        status=500, 
+                        mimetype='application/json')
+
+    # Process the data
+    try:
         df = pd.DataFrame(data["prices"])
         df.columns = ["date", "price"]
         df["date"] = pd.to_datetime(df["date"], unit='ms')
-        df = df[:-1] # removing today's price
-        print(df.tail(5))
-    else:
-        return Response(json.dumps({"Failed to retrieve data from the API": str(response.text)}), 
-                        status=response.status_code, 
-                        mimetype='application/json')
+        df = df[:-1]  # Removing today's price
 
-    # define the context and the prediction length
-    context = torch.tensor(df["price"])
-    prediction_length = 1
+        if df.empty:
+            raise ValueError("No historical data available")
 
-    try:
-        forecast = pipeline.predict(context, prediction_length)  # shape [num_series, num_samples, prediction_length]
-        print(forecast[0].mean().item()) # taking the mean of the forecasted prediction
-        return Response(str(forecast[0].mean().item()), status=200)
+        logger.info(f"Data retrieved: {df.tail(5)}")
+
+        # Prepare data for the model
+        context = df["price"].tolist()
+        context_str = ' '.join(map(str, context))
+        
+        # Define the prediction length
+        prediction_length = 1
+        
+        # Make prediction
+        forecast = forecasting_pipeline(context_str, max_length=prediction_length)
+        forecast_mean = forecast[0]['generated_text']
+
+        return Response(str(forecast_mean), status=200)
     except Exception as e:
+        logger.error(f"Data processing or prediction error: {e}")
         return Response(json.dumps({"error": str(e)}), status=500, mimetype='application/json')
 
-# run our Flask app
+# Run our Flask app
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
