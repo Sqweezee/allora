@@ -3,4 +3,4 @@ gunicorn[gthread]
 transformers[torch]
 pandas
 python-dotenv
-git+https://github.com/amazon-science/chronos-forecasting.git
+git+https://github.com/ibm-granite/granite-tsfm
