@@ -3,7 +3,8 @@ import requests
 import json
 import pandas as pd
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoTokenizer
+from granite import GraniteModel
 import logging
 
 # Configure logging
@@ -38,12 +39,12 @@ def get_inference(token):
     """Generate inference for given token."""
     try:
         # Load the model and tokenizer
-        model = AutoModelForCausalLM.from_pretrained(model_name)
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        forecasting_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
+        model = GraniteModel.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)  # Adjust if different
+        model.eval()
     except Exception as e:
-        logger.error(f"Pipeline initialization error: {e}")
-        return Response(json.dumps({"pipeline error": str(e)}), status=500, mimetype='application/json')
+        logger.error(f"Model initialization error: {e}")
+        return Response(json.dumps({"model error": str(e)}), status=500, mimetype='application/json')
 
     try:
         # Get the data from Coingecko
@@ -54,13 +55,12 @@ def get_inference(token):
 
     headers = {
         "accept": "application/json",
-        # Replace with your API key or manage securely
         "x-cg-demo-api-key": "CG-ts4JYFHPiNtfFkn7F88EgR2s" 
     }
 
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raises an HTTPError for bad responses
+        response.raise_for_status()
         data = response.json()
     except requests.RequestException as e:
         logger.error(f"API request error: {e}")
@@ -81,15 +81,14 @@ def get_inference(token):
         logger.info(f"Data retrieved: {df.tail(5)}")
 
         # Prepare data for the model
-        context = df["price"].tolist()
-        context_str = ' '.join(map(str, context))
-        
-        # Define the prediction length
-        prediction_length = 1
+        prices = df["price"].values.astype(float)
+        context = torch.tensor(prices).unsqueeze(0)  # Adding batch dimension
         
         # Make prediction
-        forecast = forecasting_pipeline(context_str, max_length=prediction_length)
-        forecast_mean = forecast[0]['generated_text']
+        with torch.no_grad():
+            forecast = model(context)
+        
+        forecast_mean = forecast.mean().item()  # Adjust if model output is different
 
         return Response(str(forecast_mean), status=200)
     except Exception as e:
