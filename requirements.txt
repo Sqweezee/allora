@@ -3,4 +3,4 @@ gunicorn[gthread]
 transformers[torch]
 pandas
 python-dotenv
-git+https://github.com/ibm-granite/granite-tsfm
+git+https://github.com/SalesforceAIResearch/uni2ts
