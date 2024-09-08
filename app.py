@@ -3,9 +3,9 @@ import requests
 import json
 import pandas as pd
 import torch
-from transformers import AutoTokenizer
-from granite import GraniteModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,7 +15,17 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Define the Hugging Face model we will use
-model_name = "ibm-granite/granite-timeseries-ttm-v1"
+model_name = "Salesforce/moirai-1.0-R-large"
+
+# Load the model and tokenizer once when the app starts
+try:
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model.eval()
+    logger.info("Model and tokenizer loaded successfully.")
+except Exception as e:
+    logger.error(f"Model initialization error: {e}")
+    raise RuntimeError("Model initialization failed.")
 
 def get_coingecko_url(token):
     base_url = "https://api.coingecko.com/api/v3/coins/"
@@ -38,15 +48,6 @@ def get_coingecko_url(token):
 def get_inference(token):
     """Generate inference for given token."""
     try:
-        # Load the model and tokenizer
-        model = GraniteModel.from_pretrained(model_name)
-        tokenizer = AutoTokenizer.from_pretrained(model_name)  # Adjust if different
-        model.eval()
-    except Exception as e:
-        logger.error(f"Model initialization error: {e}")
-        return Response(json.dumps({"model error": str(e)}), status=500, mimetype='application/json')
-
-    try:
         # Get the data from Coingecko
         url = get_coingecko_url(token)
     except ValueError as e:
@@ -55,7 +56,7 @@ def get_inference(token):
 
     headers = {
         "accept": "application/json",
-        "x-cg-demo-api-key": "CG-ts4JYFHPiNtfFkn7F88EgR2s" 
+        "x-cg-demo-api-key": os.getenv("COINGECKO_API_KEY")  # Use environment variable for API key
     }
 
     try:
@@ -64,13 +65,16 @@ def get_inference(token):
         data = response.json()
     except requests.RequestException as e:
         logger.error(f"API request error: {e}")
-        return Response(json.dumps({"Failed to retrieve data from the API": str(e)}), 
+        return Response(json.dumps({"error": "Failed to retrieve data from the API", "details": str(e)}), 
                         status=500, 
                         mimetype='application/json')
 
     # Process the data
     try:
-        df = pd.DataFrame(data["prices"])
+        df = pd.DataFrame(data.get("prices", []))
+        if df.empty or df.shape[1] != 2:
+            raise ValueError("Invalid data format received from API")
+
         df.columns = ["date", "price"]
         df["date"] = pd.to_datetime(df["date"], unit='ms')
         df = df[:-1]  # Removing today's price
@@ -82,15 +86,18 @@ def get_inference(token):
 
         # Prepare data for the model
         prices = df["price"].values.astype(float)
-        context = torch.tensor(prices).unsqueeze(0)  # Adding batch dimension
+        prices_str = ' '.join(map(str, prices))  # Convert prices to a space-separated string
+        
+        # Tokenize input
+        inputs = tokenizer(prices_str, return_tensors="pt")
         
         # Make prediction
         with torch.no_grad():
-            forecast = model(context)
+            outputs = model.generate(**inputs)
         
-        forecast_mean = forecast.mean().item()  # Adjust if model output is different
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        return Response(str(forecast_mean), status=200)
+        return Response(json.dumps({"generated_text": generated_text}), status=200, mimetype='application/json')
     except Exception as e:
         logger.error(f"Data processing or prediction error: {e}")
         return Response(json.dumps({"error": str(e)}), status=500, mimetype='application/json')
